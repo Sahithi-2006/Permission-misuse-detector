@@ -1,125 +1,115 @@
 import xml.etree.ElementTree as ET
-import os
 import json
+import os
 
 ANDROID_NS = '{http://schemas.android.com/apk/res/android}'
+DATASET_PATH = "permission_dataset.json"
 
-# Load dataset
-with open("permission_dataset.json", "r") as f:
-    PERMISSION_RISK_DB = json.load(f)
+if os.path.exists(DATASET_PATH):
+    with open(DATASET_PATH, "r") as f:
+        PERMISSION_DATASET = json.load(f)
+else:
+    PERMISSION_DATASET = {}
 
-# Permission category mapping (pattern-based)
-PERMISSION_CATEGORIES = {
-    "LOCATION": 2,
-    "SMS": 3,
-    "CONTACTS": 3,
-    "CALL": 3,
-    "PHONE": 3,
-    "MICROPHONE": 3,
-    "AUDIO": 3,
-    "CAMERA": 3,
-    "STORAGE": 2,
-    "EXTERNAL_STORAGE": 2,
-    "SYSTEM": 3,
-    "SECURE": 3,
-    "OVERLAY": 3,
-    "ALERT": 3,
-    "PACKAGE": 2,
-    "INTERNET": 1,
-    "NETWORK": 1,
-    "WIFI": 1
-}
 
+# ===============================
+# Extract Permissions
+# ===============================
 
 def extract_permissions(manifest_path):
-    if not os.path.exists(manifest_path):
-        raise FileNotFoundError("AndroidManifest.xml not found.")
-
     tree = ET.parse(manifest_path)
     root = tree.getroot()
 
     permissions = set()
-    for perm in root.findall("uses-permission"):
-        name = perm.get(f"{ANDROID_NS}name")
-        if name:
-            permissions.add(name)
+
+    for elem in root.iter():
+        if "uses-permission" in elem.tag:
+            name = elem.get(f"{ANDROID_NS}name")
+            if name:
+                permissions.add(name)
 
     return permissions
 
 
-def classify_permission(permission):
-    """
-    Classifies permission using:
-    1. Exact dataset match
-    2. Pattern category detection
-    3. Unknown detection
-    """
+# ===============================
+# Detect System App
+# ===============================
 
-    # Exact match from dataset
-    if permission in PERMISSION_RISK_DB:
-        level = PERMISSION_RISK_DB[permission]
-        return level, 3 if level == "HIGH" else 2 if level == "MEDIUM" else 1
+def is_system_app(manifest_path):
+    tree = ET.parse(manifest_path)
+    root = tree.getroot()
 
-    # Pattern-based category detection
-    for keyword, weight in PERMISSION_CATEGORIES.items():
-        if keyword in permission:
-            if weight == 3:
-                return "HIGH", 3
-            elif weight == 2:
-                return "MEDIUM", 2
-            else:
-                return "LOW", 1
+    app = root.find("application")
+    if app is not None:
+        shared_user = root.get(f"{ANDROID_NS}sharedUserId")
+        if shared_user:
+            return True
 
-    # Custom or unknown permission
-    if not permission.startswith("android.permission."):
-        return "CUSTOM", 2
-
-    return "UNKNOWN", 2
+    return False
 
 
-def detect_dangerous_combinations(permissions):
-    """
-    Detect risky permission combinations
-    """
-    combos = []
+# ===============================
+# Intelligent Risk Scoring
+# ===============================
 
-    if "android.permission.READ_SMS" in permissions and \
-       "android.permission.INTERNET" in permissions:
-        combos.append("SMS data exfiltration risk")
+def calculate_risk_score(permissions, is_system=False):
 
-    if "android.permission.RECORD_AUDIO" in permissions and \
-       "android.permission.INTERNET" in permissions:
-        combos.append("Audio spying risk")
-
-    if "android.permission.SYSTEM_ALERT_WINDOW" in permissions and \
-       "android.permission.INTERNET" in permissions:
-        combos.append("Overlay phishing attack risk")
-
-    return combos
-
-
-def calculate_risk_score(permissions):
     score = 0
     detailed_report = []
+    combos = []
 
-    for p in permissions:
-        level, weight = classify_permission(p)
-        score += weight
-        detailed_report.append((p, level))
+    dangerous_count = 0
+    signature_count = 0
 
-    # Add combo penalties
-    combos = detect_dangerous_combinations(permissions)
-    score += len(combos) * 3
+    for perm in permissions:
+
+        category = PERMISSION_DATASET.get(perm, "unknown")
+
+        detailed_report.append((perm, category))
+
+        if category == "normal":
+            score += 0
+
+        elif category == "dangerous":
+            score += 2
+            dangerous_count += 1.5
+
+        elif category == "signature":
+            signature_count += 3
+            if not is_system:
+                score += 4   # High risk if normal app requesting system permission
+
+        elif category == "unknown":
+            score += 0.3
+
+    # Combo detection
+    if "android.permission.READ_SMS" in permissions and \
+       "android.permission.INTERNET" in permissions:
+        combos.append("SMS + INTERNET (Possible Data Exfiltration)")
+        score += 5
+
+    if dangerous_count >= 5:
+        combos.append("High number of dangerous permissions")
+        score += 4
+
+    if signature_count >= 3 and not is_system:
+        combos.append("Non-system app requesting multiple system permissions")
+        score += 6
 
     return score, detailed_report, combos
 
 
+# ===============================
+# Verdict
+# ===============================
+
 def verdict(score):
-    if score >= 20:
-        return "🚨 CRITICAL RISK"
-    elif score >= 12:
-        return "⚠ HIGH RISK"
-    elif score >= 6:
-        return "🟠 MEDIUM RISK"
+
+    if score >= 25:
+        return "CRITICAL RISK"
+    elif score >= 15:
+        return "HIGH RISK"
+    elif score >= 8:
+        return "MEDIUM RISK"
     else:
-        return "🟢 LOW RISK"
+        return "LOW RISK"
